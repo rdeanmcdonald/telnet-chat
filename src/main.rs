@@ -11,13 +11,16 @@ use tokio::{
 
 type Message = (String, SocketAddr);
 
-async fn receive_channel_message(
+async fn receive_channel_message<'a>(
     mut receiver: Receiver<Message>,
-    soc_sender: tokio::sync::mpsc::Sender<Message>,
+    mut writer: WriteHalf<'a>,
+    my_addr: SocketAddr,
 ) {
     loop {
-        let msg = receiver.recv().await.unwrap();
-        soc_sender.send(msg).await.unwrap();
+        let (msg, addr) = receiver.recv().await.unwrap();
+        if addr != my_addr {
+            writer.write_all(msg.as_bytes()).await.unwrap();
+        }
     }
 }
 
@@ -40,24 +43,6 @@ async fn receive_client_message<'a>(
     }
 }
 
-async fn socket_writer<'a>(
-    mut writer: WriteHalf<'a>,
-    mut soc_receiver: tokio::sync::mpsc::Receiver<Message>,
-    my_addr: SocketAddr,
-) {
-    loop {
-        let msg = soc_receiver.recv().await;
-        match msg {
-            Some((m, addr)) => {
-                if addr != my_addr {
-                    writer.write_all(m.as_bytes()).await.unwrap();
-                }
-            }
-            None => break,
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
@@ -72,8 +57,6 @@ async fn main() -> io::Result<()> {
         tokio::spawn(async move {
             // A CONNECTION
 
-            let (soc_sender, soc_receiver) = tokio::sync::mpsc::channel::<Message>(10);
-
             // the reader/writer are just refs to the underlying TcpStream how
             // can we share this TcpStream ref across threads? E.g. how can we
             // have one thread read, and another write? Not exactly sure, but
@@ -82,10 +65,9 @@ async fn main() -> io::Result<()> {
 
             // In parallel, receive message from client, and receive message
             // from channel
-            let (_a, _b, _c) = join!(
+            let (_a, _b) = join!(
                 receive_client_message(soc_reader, my_addr, brod_sender.clone()),
-                receive_channel_message(brod_receiver, soc_sender),
-                socket_writer(soc_writer, soc_receiver, my_addr)
+                receive_channel_message(brod_receiver, soc_writer, my_addr),
             );
         });
     }
